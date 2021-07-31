@@ -1,0 +1,252 @@
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pytesseract
+
+pytesseract.pytesseract.tesseract_cmd = 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe'
+import imutils
+import pprint
+import os
+
+DEG2RAD = np.pi / 180
+RAD2DEG = 1 / DEG2RAD
+
+def get_mask(image_source):
+    frame = cv2.imread(image_source)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    lower_red = np.array([24,24,24])
+    upper_red = np.array([28,28,28])
+
+    mask = cv2.inRange(rgb, lower_red, upper_red)
+    #res = cv2.bitwise_and(frame,frame, mask= mask)
+    #cv2.imshow('frame',frame)
+    cv2.imwrite('mask.png',mask)
+    #cv2.imwrite('res.png',res)
+    return mask
+
+def is_invertible(a):
+    return a.shape[0] == a.shape[1] and np.linalg.matrix_rank(a) == a.shape[0]
+
+
+def intersection(line1, line2):
+    rho1, theta1 = line1
+    rho2, theta2 = line2
+    A = np.array([
+        [np.cos(theta1), np.sin(theta1)],
+        [np.cos(theta2), np.sin(theta2)]
+    ])
+    b = np.array([[rho1], [rho2]])
+    if is_invertible(A):
+        x0, y0 = np.linalg.solve(A, b)
+        x0, y0 = int(np.round(x0)), int(np.round(y0))
+    else:
+        x0, y0 = -1, -1
+    return x0, y0
+
+
+def calc_rho_theta(input_point):
+    x1, y1, x2, y2 = input_point
+    theta = np.arctan2(-(x1 - x2), (y1 - y2))
+    rho = x1 * np.cos(theta) + y1 * np.sin(theta)
+    return rho, theta
+
+
+def clean_lines_p(lines_lst, lines_p):
+    votes = np.zeros(len(lines_lst))
+    for i, line_i in enumerate(lines_lst):
+        for lines_p_i in lines_p:
+            rho1, theta1 = line_i
+            rho2, theta2 = lines_p_i
+            if np.abs(rho2 - rho1) <= 10 and np.abs(theta2 - theta1) <= 5 * np.pi / 180:
+                votes[i] += 1
+    return [line_v_i for i, line_v_i in enumerate(lines_lst) if votes[i] >= 1]
+
+
+def clean_lines_sim(lines_lst1):
+    delete_list = []
+    mean_theta = np.median([line_i[1] for line_i in lines_lst1])
+    for i, line_i in enumerate(lines_lst1):
+        for j, lines_j in enumerate(lines_lst1):
+            if i < j and (j not in delete_list or i not in delete_list):
+                rho1, theta1 = line_i
+                rho2, theta2 = lines_j
+                if np.abs(rho2 - rho1) <= 10 and np.abs(theta2 - theta1) <= 5 * np.pi / 180:
+                    d1 = np.abs(mean_theta - theta1)
+                    d2 = np.abs(mean_theta - theta2)
+                    if d1 > d2:
+                        delete_list.append(i)
+                    else:
+                        delete_list.append(j)
+    return [l for i, l in enumerate(lines_lst1) if i not in delete_list]
+
+
+def complete_line(lines):
+    rho_vec = [line_i[0] for line_i in lines]
+    theta_vec = [line_i[1] for line_i in lines]
+    idx = np.argsort(rho_vec)
+    lines_sorted = [lines[i] for i in idx]
+    rho_vec_sorted = [rho_vec[i] for i in idx]
+    diff_v = np.median(np.diff(rho_vec_sorted))
+    n = len(lines)
+    lines_com = [lines_sorted[0]]
+    i = 1
+    while i < n:
+        rho_next = lines_sorted[i][0]
+        rho_prev = lines_com[-1][0]
+        theta_next = lines_sorted[i][1]
+        theta_prev = lines_com[-1][1]
+        if np.abs(rho_next - rho_prev - diff_v) <= diff_v / 2.0:
+            lines_com.append(lines_sorted[i])
+            i += 1
+        else:
+            lines_com.append([(rho_prev + rho_next) * 0.5, (theta_next + theta_prev) * 0.5])
+    return lines_com
+
+
+# Where the options are as follows:
+#
+#     out_w is the width of the output rectangle
+#     out_h is the height of the output rectangle
+#     x and y specify the top left corner of the output rectangle
+def ffmpeg_crop(video_file, coor_matrix, text_mat):
+    command_list=[]
+    new_dir=str(VIDEO_SOURCE).replace(".mp4","_tiles")
+    if not (os.path.isdir(new_dir)):
+        os.mkdir(new_dir)
+    import tqdm
+    m, n = coor_shape
+    for i in range(n):
+        for j in range(m):
+
+            tl_corner_x = coor_matrix[i][j][1][0]
+            tl_corner_y = coor_matrix[i][j][1][1]
+            tile_width=coor_matrix[i][j][0][0]
+            tile_hight=coor_matrix[i][j][0][1]
+            if len(text_mat[i][j])>2:
+                command_string='ffmpeg -i {} -vf "crop={}:{}:{}:{}" -loglevel panic -c:a copy {}/tile_{}{}_{}.mp4'.format(video_file, tile_width, tile_hight,
+                                                                                tl_corner_x, tl_corner_y,new_dir,str(text_mat[i][j]).strip(), i, j)
+            else:
+                command_string='ffmpeg -i {} -vf "crop={}:{}:{}:{}" -loglevel panic -c:a copy {}/tile_{}_{}.mp4'.format(video_file, tile_width, tile_hight, tl_corner_x, tl_corner_y,new_dir, i, j)
+            print(command_string)
+            command_list.append(command_string)
+
+    for item in tqdm.tqdm(command_list):
+        os.system(item)
+
+def get_vid_duration(video_file):
+    video = cv2.VideoCapture(video_file)
+    duration = video.get(cv2.CAP_PROP_POS_MSEC)
+    frame_count = video.get(cv2.CAP_PROP_FRAME_COUNT)
+
+    return duration, frame_count
+
+def get_the_screenshot(video_file, seconds):
+    os.system('ffmpeg -ss {} -i {} -vframes 1 -q:v 2 screenshot.jpg'.format(seconds,video_file))
+    return
+
+def find_lines(img):
+    #gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(img, 50, 150, apertureSize=3)
+    v_lines = cv2.HoughLines(edges, 1, 1 * np.pi / 180, 150, min_theta=-30.0 * np.pi / 180,
+                             max_theta=30.0 * np.pi / 180)
+    h_lines = cv2.HoughLines(edges, 1, 1 * np.pi / 180, 150, min_theta=60.0 * np.pi / 180,
+                             max_theta=120.0 * np.pi / 180)
+    min_line_length = int(img.shape[1] / 6)
+    max_line_gap = 15
+    lines_p = cv2.HoughLinesP(edges, 1, np.pi / 180, 100, min_line_length, max_line_gap)
+    lines_p_hough = [calc_rho_theta(line_i[0]) for line_i in lines_p]
+    v_lines = [l[0] for l in v_lines]
+    h_lines = [l[0] for l in h_lines]
+    v_lines = clean_lines_p(v_lines, lines_p_hough)
+    v_lines = clean_lines_sim(v_lines)
+    v_lines = complete_line(v_lines)
+    h_lines = clean_lines_p(h_lines, lines_p_hough)
+    h_lines = clean_lines_sim(h_lines)
+    h_lines = complete_line(h_lines)
+    orig_img = img.copy()
+    for line_i in h_lines:
+        rho, theta = line_i
+        a = np.cos(theta)
+        b = np.sin(theta)
+        x0 = a * rho
+        y0 = b * rho
+        x1 = int(x0 + 1000 * (-b))
+        y1 = int(y0 + 1000 * (a))
+        x2 = int(x0 - img.shape[1] * (-b))
+        y2 = int(y0 - img.shape[0] * (a))
+        cv2.line(img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+    for line_i in v_lines:
+        rho, theta = line_i
+        a = np.cos(theta)
+        b = np.sin(theta)
+        x0 = a * rho
+        y0 = b * rho
+        x1 = int(x0 + 1000 * (-b))
+        y1 = int(y0 + 1000 * (a))
+        x2 = int(x0 - img.shape[1] * (-b))
+        y2 = int(y0 - img.shape[0] * (a))
+        cv2.line(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+    n = len(h_lines) - 1
+    m = len(v_lines) - 1
+    global coor_shape
+    coor_shape= (m,n)
+    cell_mat = [[0 for _ in range(m)] for _ in range(n)]
+    coor = [[0 for _ in range(m)] for _ in range(n)]
+    _text_mat = [[0 for _ in range(m)] for _ in range(n)]
+    orig = cv2.imread(EXAMPLE_FRAME)
+
+    for i in range(len(h_lines)):
+        for j in range(len(v_lines)):
+            if i >= 0 and j >= 0:
+                x1, y1 = intersection(h_lines[i - 1], v_lines[j - 1])  # upper left
+                x2, y2 = intersection(h_lines[i - 1], v_lines[j])  # upper right
+                x3, y3 = intersection(h_lines[i], v_lines[j - 1])  # lower left
+                x4, y4 = intersection(h_lines[i], v_lines[j])  # lower right
+                x_start = min(x1, x3)
+                y_start = min(y1, y2)
+                x_end = max(x2, x4)
+                y_end = max(y3, y4)
+                cell_mat[i - 1][j - 1] = orig[y_start:y_end + 1, x_start:x_end + 1]
+                #coor[i - 1][j - 1] = (x_start, y_start), (x_end, y_end)
+                coor[i - 1][j - 1] = (x_end-x_start, y_end-y_start),(x_start, y_start)
+
+    coor_=coor
+
+    count = 1
+    for i in range(n):
+        for j in range(m):
+            plt.subplot(n, m, count)
+            cell_img = cell_mat[i][j]
+            plt.imshow(cell_img, 'gray')
+            count += 1
+            text_box=pytesseract.image_to_string(cell_mat[i][j], config='--oem 1 -c tessedit_char_whitelist=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ')
+            #text_box=pytesseract.image_to_string(cell_mat[i][j])
+            # plt.show()
+            pprint.pprint(coor[i][j])
+            # print(coor[i][j][0][0])
+            _text_mat[i][j] = text_box
+    text_mat=_text_mat
+    ffmpeg_crop(VIDEO_SOURCE,coor,text_mat)
+    plt.savefig('tiles_plot.png')
+    cv2.imwrite('ronen1.jpg', img)
+
+    print("Tiles found:\t{}".format(count - 1))
+
+
+if __name__ == "__main__":
+    #EXAMPLE_FRAME='zoom_call.png'
+    VIDEO_SOURCE='onlyVideo_8X.mp4'
+    vid_duration,_=get_vid_duration(VIDEO_SOURCE)
+    EXAMPLE_FRAME=get_the_screenshot(VIDEO_SOURCE, int(vid_duration/3))
+    mask_im=get_mask(EXAMPLE_FRAME)
+    global text_mat
+    #img = cv2.imread('mask.png')
+    find_lines(mask_im)
+    #cv2.imshow('image window', mask_im)
+
+    cv2.waitKey(0)
+    print("\n##############################\n##############################\nDONE\n##############################\n##############################")
+
