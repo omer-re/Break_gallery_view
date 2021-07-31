@@ -7,6 +7,8 @@ pytesseract.pytesseract.tesseract_cmd = 'C:\\Program Files\\Tesseract-OCR\\tesse
 import imutils
 import pprint
 import os
+import tqdm
+
 
 DEG2RAD = np.pi / 180
 RAD2DEG = 1 / DEG2RAD
@@ -114,7 +116,6 @@ def ffmpeg_crop(video_file, coor_matrix, text_mat):
     new_dir=str(VIDEO_SOURCE).replace(".mp4","_tiles")
     if not (os.path.isdir(new_dir)):
         os.mkdir(new_dir)
-    import tqdm
     m, n = coor_shape
     for i in range(n):
         for j in range(m):
@@ -238,7 +239,8 @@ def find_lines(img):
 
 if __name__ == "__main__":
     #EXAMPLE_FRAME='zoom_call.png'
-    VIDEO_SOURCE='onlyVideo_8X.mp4'
+    #VIDEO_SOURCE='onlyVideo_8X.mp4'
+    VIDEO_SOURCE=input("Enter the path of your video: ")
     vid_duration,_=get_vid_duration(VIDEO_SOURCE)
     EXAMPLE_FRAME=get_the_screenshot(VIDEO_SOURCE, int(vid_duration/3))
     mask_im=get_mask(EXAMPLE_FRAME)
